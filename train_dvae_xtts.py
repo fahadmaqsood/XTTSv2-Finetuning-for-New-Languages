@@ -87,7 +87,23 @@ def train(output_path, train_csv_path, eval_csv_path="", language="en", lr=5e-6,
             )
 
     dvae.load_state_dict(torch.load(dvae_pretrained), strict=False)
+
+
+    print("named_parameters: ", dvae.named_parameters())
+
+    # ✅ Freeze all except LoRA layers
+    for name, param in dvae.named_parameters():
+        if "lora_" not in name:
+            param.requires_grad = False
+
     dvae.cuda()
+
+
+    trainable = sum(p.numel() for p in dvae.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in dvae.parameters())
+    print(f"Trainable parameters: {trainable} / {total}")
+
+    
     opt = Adam(dvae.parameters(), lr = LEARNING_RATE)
     torch_mel_spectrogram_dvae = TorchMelSpectrogram(
                 mel_norm_file=mel_norm_file, sampling_rate=22050
