@@ -9,6 +9,33 @@ import torchaudio
 from einops import rearrange
 
 
+class LoRAConv1d(nn.Module):
+    def __init__(self, base_conv, r=8, alpha=1.0):
+        super().__init__()
+        self.base_conv = base_conv
+        self.r = r
+        self.alpha = alpha
+
+        self.lora_A = nn.Conv1d(
+            base_conv.in_channels,
+            r,
+            kernel_size=base_conv.kernel_size,
+            stride=base_conv.stride,
+            padding=base_conv.padding,
+            bias=False
+        )
+        self.lora_B = nn.Conv1d(r, base_conv.out_channels, kernel_size=1, bias=False)
+
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+        # Freeze base conv
+        for param in self.base_conv.parameters():
+            param.requires_grad = False
+
+    def forward(self, x):
+        return self.base_conv(x) + self.alpha * self.lora_B(self.lora_A(x))
+
 def default(val, d):
     return val if val is not None else d
 
@@ -196,6 +223,9 @@ class UpsampledConv(nn.Module):
         return self.conv(up)
 
 
+
+
+
 # DiscreteVAE partially derived from lucidrains DALLE implementation
 # Credit: https://github.com/lucidrains/DALLE-pytorch
 class DiscreteVAE(nn.Module):
@@ -264,7 +294,9 @@ class DiscreteVAE(nn.Module):
 
             pad = (kernel_size - 1) // 2
             for (enc_in, enc_out), (dec_in, dec_out) in zip(enc_chans_io, dec_chans_io):
-                enc_layers.append(nn.Sequential(conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad), act()))
+                base_conv = conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad)
+                lora_conv = LoRAConv1d(base_conv, r=8, alpha=1.0)
+                enc_layers.append(nn.Sequential(lora_conv, act()))
                 if encoder_norm:
                     enc_layers.append(nn.GroupNorm(8, enc_out))
                 dec_layers.append(
