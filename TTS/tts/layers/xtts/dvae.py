@@ -10,7 +10,7 @@ from einops import rearrange
 
 
 class LoRAConv1d(nn.Module):
-    def __init__(self, base_conv, r=8, alpha=1.0):
+    def __init__(self, base_conv, r=16, alpha=8.0):
         super().__init__()
         self.base_conv = base_conv
         self.r = r
@@ -211,19 +211,15 @@ class ResBlock(nn.Module):
 
 
 class UpsampledConv(nn.Module):
-    def __init__(self, conv_class, *args, apply_lora=False, **kwargs):
+    def __init__(self, conv, *args, **kwargs):
         super().__init__()
-        assert "stride" in kwargs
-        self.stride = kwargs.pop("stride")
-        base_conv = conv_class(*args, **kwargs)
-
-        if apply_lora and isinstance(base_conv, nn.Conv1d):
-            self.conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
-        else:
-            self.conv = base_conv
+        assert "stride" in kwargs.keys()
+        self.stride = kwargs["stride"]
+        del kwargs["stride"]
+        self.conv = conv(*args, **kwargs)
 
     def forward(self, x):
-        up = F.interpolate(x, scale_factor=self.stride, mode="nearest")
+        up = nn.functional.interpolate(x, scale_factor=self.stride, mode="nearest")
         return self.conv(up)
 
 
@@ -272,12 +268,8 @@ class DiscreteVAE(nn.Module):
         else:
             conv = nn.Conv1d
             conv_transpose = nn.ConvTranspose1d
-
-
         if not use_transposed_convs:
-          def conv_transpose(*args, **kwargs):
-              apply_lora = kwargs.pop("apply_lora", False)
-              return UpsampledConv(conv, *args, apply_lora=apply_lora, **kwargs)
+            conv_transpose = functools.partial(UpsampledConv, conv)
 
         if activation == "relu":
             act = nn.ReLU
@@ -301,19 +293,15 @@ class DiscreteVAE(nn.Module):
             enc_chans_io, dec_chans_io = map(lambda t: list(zip(t[:-1], t[1:])), (enc_chans, dec_chans))
 
             pad = (kernel_size - 1) // 2
-            for i, ((enc_in, enc_out), (dec_in, dec_out)) in enumerate(zip(enc_chans_io, dec_chans_io)):
+            for (enc_in, enc_out), (dec_in, dec_out) in zip(enc_chans_io, dec_chans_io):
                 base_conv = conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad)
-                lora_conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
+                lora_conv = LoRAConv1d(base_conv)
                 enc_layers.append(nn.Sequential(lora_conv, act()))
                 if encoder_norm:
                     enc_layers.append(nn.GroupNorm(8, enc_out))
-                # dec_layers.append(
-                #     nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad), act())
-                # )
-                # decoder
-                base_dec_conv = conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad, apply_lora=(i == 0))
-                dec_layers.append(nn.Sequential(base_dec_conv, act()))
-            
+                dec_layers.append(
+                    nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad), act())
+                )
             dec_out_chans = dec_chans[-1]
             innermost_dim = dec_chans[0]
         else:
@@ -332,7 +320,6 @@ class DiscreteVAE(nn.Module):
         dec_layers.append(conv(dec_out_chans, channels, 1))
 
         self.encoder = nn.Sequential(*enc_layers)
-
         self.decoder = nn.Sequential(*dec_layers)
 
         self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
