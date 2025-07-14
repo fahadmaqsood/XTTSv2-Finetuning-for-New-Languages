@@ -295,7 +295,7 @@ class DiscreteVAE(nn.Module):
             pad = (kernel_size - 1) // 2
             for (enc_in, enc_out), (dec_in, dec_out) in zip(enc_chans_io, dec_chans_io):
                 base_conv = conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad)
-                lora_conv = LoRAConv1d(base_conv, r=8, alpha=1.0)
+                lora_conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
                 enc_layers.append(nn.Sequential(lora_conv, act()))
                 if encoder_norm:
                     enc_layers.append(nn.GroupNorm(8, enc_out))
@@ -320,6 +320,15 @@ class DiscreteVAE(nn.Module):
         dec_layers.append(conv(dec_out_chans, channels, 1))
 
         self.encoder = nn.Sequential(*enc_layers)
+
+        first_decoder_layer = dec_layers[0]
+        if isinstance(first_decoder_layer, nn.Sequential):
+            base_conv = first_decoder_layer[0]  # the Conv1d or ConvTranspose1d layer
+            activation_fn = first_decoder_layer[1]  # the ReLU or SiLU
+
+            lora_conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
+            dec_layers[0] = nn.Sequential(lora_conv, activation_fn)
+        
         self.decoder = nn.Sequential(*dec_layers)
 
         self.loss_fn = F.smooth_l1_loss if smooth_l1_loss else F.mse_loss
