@@ -10,7 +10,7 @@ from einops import rearrange
 
 
 class LoRAConv1d(nn.Module):
-    def __init__(self, base_conv, r=16, alpha=8.0):
+    def __init__(self, base_conv, r=8, alpha=4.0):
         super().__init__()
         self.base_conv = base_conv
         self.r = r
@@ -196,14 +196,18 @@ class DiscretizationLoss(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, chan, conv, activation):
+    def __init__(self, chan, conv, activation, apply_lora=False):
         super().__init__()
+
+        def wrap(conv_layer):
+            return LoRAConv1d(conv_layer) if apply_lora and isinstance(conv_layer, nn.Conv1d) else conv_layer
+
         self.net = nn.Sequential(
-            conv(chan, chan, 3, padding=1),
+            wrap(conv(chan, chan, 3, padding=1)),
             activation(),
-            conv(chan, chan, 3, padding=1),
+            wrap(conv(chan, chan, 3, padding=1)),
             activation(),
-            conv(chan, chan, 1),
+            wrap(conv(chan, chan, 1)),
         )
 
     def forward(self, x):
@@ -211,17 +215,21 @@ class ResBlock(nn.Module):
 
 
 class UpsampledConv(nn.Module):
-    def __init__(self, conv, *args, **kwargs):
+    def __init__(self, conv_class, *args, **kwargs):
         super().__init__()
-        assert "stride" in kwargs.keys()
-        self.stride = kwargs["stride"]
-        del kwargs["stride"]
-        self.conv = conv(*args, **kwargs)
+        apply_lora = kwargs.pop("apply_lora", False)
+        assert "stride" in kwargs
+        self.stride = kwargs.pop("stride")
+        base_conv = conv_class(*args, **kwargs)
+
+        if apply_lora and isinstance(base_conv, nn.Conv1d):
+            self.conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
+        else:
+            self.conv = base_conv
 
     def forward(self, x):
-        up = nn.functional.interpolate(x, scale_factor=self.stride, mode="nearest")
+        up = F.interpolate(x, scale_factor=self.stride, mode="nearest")
         return self.conv(up)
-
 
 
 
@@ -300,7 +308,7 @@ class DiscreteVAE(nn.Module):
                 if encoder_norm:
                     enc_layers.append(nn.GroupNorm(8, enc_out))
                 dec_layers.append(
-                    nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad), act())
+                    nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad, apply_lora=True), act())
                 )
             dec_out_chans = dec_chans[-1]
             innermost_dim = dec_chans[0]
@@ -310,7 +318,7 @@ class DiscreteVAE(nn.Module):
             innermost_dim = hidden_dim
 
         for _ in range(num_resnet_blocks):
-            dec_layers.insert(0, ResBlock(innermost_dim, conv, act))
+            dec_layers.insert(0, ResBlock(innermost_dim, conv, act, apply_lora=True))
             enc_layers.append(ResBlock(innermost_dim, conv, act))
 
         if num_resnet_blocks > 0:
