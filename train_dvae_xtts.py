@@ -1,6 +1,7 @@
 import torch
 # import wandb
-from TTS.tts.layers.xtts.dvae import DiscreteVAE
+import torch.nn as nn
+from TTS.tts.layers.xtts.dvae import DiscreteVAE, LoRAConv1d
 from TTS.tts.layers.tortoise.arch_utils import TorchMelSpectrogram
 from torch.utils.data import DataLoader
 from TTS.tts.layers.xtts.trainer.dvae_dataset import DVAEDataset
@@ -88,6 +89,14 @@ def train(output_path, train_csv_path, eval_csv_path="", language="en", lr=5e-6,
 
     dvae.load_state_dict(torch.load(dvae_pretrained), strict=False)
 
+
+    # if isinstance(dvae.decoder[0], nn.Sequential):
+    #     base_conv = dvae.decoder[0][0]
+    #     act_fn = dvae.decoder[0][1]
+    #     dvae.decoder[0] = nn.Sequential(LoRAConv1d(base_conv, r=8, alpha=4.0), act_fn)
+    # else:
+    #     base_conv = dvae.decoder[0]
+    #     dvae.decoder[0] = LoRAConv1d(base_conv, r=8, alpha=4.0)
 
     print("named_parameters: ", dvae.named_parameters())
 
@@ -211,6 +220,9 @@ def train(output_path, train_csv_path, eval_csv_path="", language="en", lr=5e-6,
             if eval_loss < best_loss:
                 best_loss = eval_loss
                 torch.save(dvae.state_dict(), dvae_pretrained)
+
+                # lora_state_dict = {k: v for k, v in dvae.state_dict().items() if "lora_" in k}
+                # torch.save(lora_state_dict, os.path.join(output_path, "dvae-lora.pth"))
             print(f"#######################################\nepoch: {i}\tEVAL loss: {eval_loss}\n#######################################")
 
     print(f'Checkpoint saved at {dvae_pretrained}')
