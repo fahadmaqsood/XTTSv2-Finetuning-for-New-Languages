@@ -322,7 +322,7 @@ class DiscreteVAE(nn.Module):
             enc_layers.append(ResBlock(innermost_dim, conv, act))
 
         if num_resnet_blocks > 0:
-            dec_layers.insert(0, conv(codebook_dim, innermost_dim, 1))
+            dec_layers.insert(0, LoRAConv1d(conv(codebook_dim, innermost_dim, 1)))
 
         enc_layers.append(conv(innermost_dim, codebook_dim, 1))
         dec_layers.append(conv(dec_out_chans, channels, 1))
