@@ -9,33 +9,6 @@ import torchaudio
 from einops import rearrange
 
 
-class LoRAConv1d(nn.Module):
-    def __init__(self, base_conv, r=8, alpha=4.0):
-        super().__init__()
-        self.base_conv = base_conv
-        self.r = r
-        self.alpha = alpha
-
-        self.lora_A = nn.Conv1d(
-            base_conv.in_channels,
-            r,
-            kernel_size=base_conv.kernel_size,
-            stride=base_conv.stride,
-            padding=base_conv.padding,
-            bias=False
-        )
-        self.lora_B = nn.Conv1d(r, base_conv.out_channels, kernel_size=1, bias=False)
-
-        nn.init.kaiming_uniform_(self.lora_A.weight, a=sqrt(5))
-        nn.init.zeros_(self.lora_B.weight)
-
-        # Freeze base conv
-        for param in self.base_conv.parameters():
-            param.requires_grad = False
-
-    def forward(self, x):
-        return self.base_conv(x) + self.alpha * self.lora_B(self.lora_A(x))
-
 def default(val, d):
     return val if val is not None else d
 
@@ -76,58 +49,49 @@ def dvae_wav_to_mel(
 
 
 class Quantize(nn.Module):
-    def __init__(self, dim, n_embed, decay=0.99, eps=1e-5, balancing_heuristic=False, new_return_order=False):
+    def __init__(self, dim, n_embed, decay=0.99, eps=1e-5, balancing_heuristic=False, new_return_order=False, unfreeze_fraction=0.25):
         super().__init__()
 
         self.dim = dim
         self.n_embed = n_embed
         self.decay = decay
         self.eps = eps
-
+        self.unfreeze_fraction = unfreeze_fraction
         self.balancing_heuristic = balancing_heuristic
-        self.codes = None
-        self.max_codes = 64000
-        self.codes_full = False
         self.new_return_order = new_return_order
 
-        embed = torch.randn(dim, n_embed)
-        self.register_buffer("embed", embed)
+        self.embed = nn.Parameter(torch.randn(dim, n_embed))
         self.register_buffer("cluster_size", torch.zeros(n_embed))
-        self.register_buffer("embed_avg", embed.clone())
+        self.register_buffer("embed_avg", self.embed.data.clone())
+        self.register_buffer("trainable_mask", torch.ones(n_embed).bool())  # Will be updated later
+
+        self.mask_initialized = False  # We'll initialize trainable_mask after first forward pass
+
+    def update_trainable_mask(self):
+        # Pick bottom-k (least used) indices to unfreeze
+        k = int(self.unfreeze_fraction * self.n_embed)
+        sorted_indices = torch.argsort(self.cluster_size)  # Ascending: least used first
+        unfreeze_indices = sorted_indices[:k]
+
+        mask = torch.zeros_like(self.cluster_size, dtype=torch.bool)
+        mask[unfreeze_indices] = True
+        self.trainable_mask = mask
+        self.mask_initialized = True
 
     def forward(self, input, return_soft_codes=False):
-        if self.balancing_heuristic and self.codes_full:
-            h = torch.histc(self.codes, bins=self.n_embed, min=0, max=self.n_embed) / len(self.codes)
-            mask = torch.logical_or(h > 0.9, h < 0.01).unsqueeze(1)
-            ep = self.embed.permute(1, 0)
-            ea = self.embed_avg.permute(1, 0)
-            rand_embed = torch.randn_like(ep) * mask
-            self.embed = (ep * ~mask + rand_embed).permute(1, 0)
-            self.embed_avg = (ea * ~mask + rand_embed).permute(1, 0)
-            self.cluster_size = self.cluster_size * ~mask.squeeze()
-            if torch.any(mask):
-                print(f"Reset {torch.sum(mask)} embedding codes.")
-                self.codes = None
-                self.codes_full = False
-
         flatten = input.reshape(-1, self.dim)
-        dist = flatten.pow(2).sum(1, keepdim=True) - 2 * flatten @ self.embed + self.embed.pow(2).sum(0, keepdim=True)
+        dist = (
+            flatten.pow(2).sum(1, keepdim=True)
+            - 2 * flatten @ self.embed
+            + self.embed.pow(2).sum(0, keepdim=True)
+        )
         soft_codes = -dist
         _, embed_ind = soft_codes.max(1)
-        embed_onehot = F.one_hot(embed_ind, self.n_embed).type(flatten.dtype)
         embed_ind = embed_ind.view(*input.shape[:-1])
         quantize = self.embed_code(embed_ind)
 
-        if self.balancing_heuristic:
-            if self.codes is None:
-                self.codes = embed_ind.flatten()
-            else:
-                self.codes = torch.cat([self.codes, embed_ind.flatten()])
-                if len(self.codes) > self.max_codes:
-                    self.codes = self.codes[-self.max_codes :]
-                    self.codes_full = True
-
         if self.training:
+            embed_onehot = F.one_hot(embed_ind.view(-1), self.n_embed).type(flatten.dtype)
             embed_onehot_sum = embed_onehot.sum(0)
             embed_sum = flatten.transpose(0, 1) @ embed_onehot
 
@@ -137,10 +101,17 @@ class Quantize(nn.Module):
 
             self.cluster_size.data.mul_(self.decay).add_(embed_onehot_sum, alpha=1 - self.decay)
             self.embed_avg.data.mul_(self.decay).add_(embed_sum, alpha=1 - self.decay)
+
+            if not self.mask_initialized:
+                self.update_trainable_mask()
+
             n = self.cluster_size.sum()
             cluster_size = (self.cluster_size + self.eps) / (n + self.n_embed * self.eps) * n
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
-            self.embed.data.copy_(embed_normalized)
+
+            with torch.no_grad():
+                mask = self.trainable_mask.unsqueeze(0)
+                self.embed.data = self.embed.data * (~mask) + embed_normalized * mask
 
         diff = (quantize.detach() - input).pow(2).mean()
         quantize = input + (quantize - input).detach()
@@ -154,7 +125,6 @@ class Quantize(nn.Module):
 
     def embed_code(self, embed_id):
         return F.embedding(embed_id, self.embed.transpose(0, 1))
-
 
 # Fits a soft-discretized input to a normal-PDF across the specified dimension.
 # In other words, attempts to force the discretization function to have a mean equal utilization across all discrete
@@ -196,18 +166,14 @@ class DiscretizationLoss(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, chan, conv, activation, apply_lora=False):
+    def __init__(self, chan, conv, activation):
         super().__init__()
-
-        def wrap(conv_layer):
-            return LoRAConv1d(conv_layer) if apply_lora and isinstance(conv_layer, nn.Conv1d) else conv_layer
-
         self.net = nn.Sequential(
-            wrap(conv(chan, chan, 3, padding=1)),
+            conv(chan, chan, 3, padding=1),
             activation(),
-            wrap(conv(chan, chan, 3, padding=1)),
+            conv(chan, chan, 3, padding=1),
             activation(),
-            wrap(conv(chan, chan, 1)),
+            conv(chan, chan, 1),
         )
 
     def forward(self, x):
@@ -215,23 +181,16 @@ class ResBlock(nn.Module):
 
 
 class UpsampledConv(nn.Module):
-    def __init__(self, conv_class, *args, **kwargs):
+    def __init__(self, conv, *args, **kwargs):
         super().__init__()
-        apply_lora = kwargs.pop("apply_lora", False)
-        assert "stride" in kwargs
-        self.stride = kwargs.pop("stride")
-        base_conv = conv_class(*args, **kwargs)
-
-        if apply_lora and isinstance(base_conv, nn.Conv1d):
-            self.conv = LoRAConv1d(base_conv, r=8, alpha=4.0)
-        else:
-            self.conv = base_conv
+        assert "stride" in kwargs.keys()
+        self.stride = kwargs["stride"]
+        del kwargs["stride"]
+        self.conv = conv(*args, **kwargs)
 
     def forward(self, x):
-        up = F.interpolate(x, scale_factor=self.stride, mode="nearest")
+        up = nn.functional.interpolate(x, scale_factor=self.stride, mode="nearest")
         return self.conv(up)
-
-
 
 
 # DiscreteVAE partially derived from lucidrains DALLE implementation
@@ -302,13 +261,11 @@ class DiscreteVAE(nn.Module):
 
             pad = (kernel_size - 1) // 2
             for (enc_in, enc_out), (dec_in, dec_out) in zip(enc_chans_io, dec_chans_io):
-                base_conv = conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad)
-                lora_conv = LoRAConv1d(base_conv)
-                enc_layers.append(nn.Sequential(lora_conv, act()))
+                enc_layers.append(nn.Sequential(conv(enc_in, enc_out, kernel_size, stride=stride, padding=pad), act()))
                 if encoder_norm:
                     enc_layers.append(nn.GroupNorm(8, enc_out))
                 dec_layers.append(
-                    nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad, apply_lora=True), act())
+                    nn.Sequential(conv_transpose(dec_in, dec_out, kernel_size, stride=stride, padding=pad), act())
                 )
             dec_out_chans = dec_chans[-1]
             innermost_dim = dec_chans[0]
@@ -318,11 +275,11 @@ class DiscreteVAE(nn.Module):
             innermost_dim = hidden_dim
 
         for _ in range(num_resnet_blocks):
-            dec_layers.insert(0, ResBlock(innermost_dim, conv, act, apply_lora=True))
+            dec_layers.insert(0, ResBlock(innermost_dim, conv, act))
             enc_layers.append(ResBlock(innermost_dim, conv, act))
 
         if num_resnet_blocks > 0:
-            dec_layers.insert(0, LoRAConv1d(conv(codebook_dim, innermost_dim, 1)))
+            dec_layers.insert(0, conv(codebook_dim, innermost_dim, 1))
 
         enc_layers.append(conv(innermost_dim, codebook_dim, 1))
         dec_layers.append(conv(dec_out_chans, channels, 1))
