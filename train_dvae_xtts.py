@@ -1,7 +1,6 @@
 import torch
 # import wandb
-import torch.nn as nn
-from TTS.tts.layers.xtts.dvae import DiscreteVAE, LoRAConv1d
+from TTS.tts.layers.xtts.dvae import DiscreteVAE
 from TTS.tts.layers.tortoise.arch_utils import TorchMelSpectrogram
 from torch.utils.data import DataLoader
 from TTS.tts.layers.xtts.trainer.dvae_dataset import DVAEDataset
@@ -89,30 +88,26 @@ def train(output_path, train_csv_path, eval_csv_path="", language="en", lr=5e-6,
 
     dvae.load_state_dict(torch.load(dvae_pretrained), strict=False)
 
+    # Save baseline total trainable parameter count (everything trainable)
+    total_before = sum(p.numel() for p in dvae.parameters() if p.requires_grad)
+    print(f"Trainable params before freezing: {total_before}")
 
-    # if isinstance(dvae.decoder[0], nn.Sequential):
-    #     base_conv = dvae.decoder[0][0]
-    #     act_fn = dvae.decoder[0][1]
-    #     dvae.decoder[0] = nn.Sequential(LoRAConv1d(base_conv, r=8, alpha=4.0), act_fn)
-    # else:
-    #     base_conv = dvae.decoder[0]
-    #     dvae.decoder[0] = LoRAConv1d(base_conv, r=8, alpha=4.0)
+    # Freeze encoder
+    for param in dvae.encoder.parameters():
+        param.requires_grad = False
 
-    print("named_parameters: ", dvae.named_parameters())
+    # Keep decoder trainable
+    for param in dvae.decoder.parameters():
+        param.requires_grad = True
 
-    # ✅ Freeze all except LoRA layers
-    for name, param in dvae.named_parameters():
-        if "lora_" not in name:
-            param.requires_grad = False
+    total_after = sum(p.numel() for p in dvae.parameters() if p.requires_grad)
+    print(f"Trainable params after freezing encoder: {total_after}")
+
+
+
+
 
     dvae.cuda()
-
-
-    trainable = sum(p.numel() for p in dvae.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in dvae.parameters())
-    print(f"Trainable parameters: {trainable} / {total}")
-
-    
     opt = Adam(dvae.parameters(), lr = LEARNING_RATE)
     torch_mel_spectrogram_dvae = TorchMelSpectrogram(
                 mel_norm_file=mel_norm_file, sampling_rate=22050
@@ -220,9 +215,6 @@ def train(output_path, train_csv_path, eval_csv_path="", language="en", lr=5e-6,
             if eval_loss < best_loss:
                 best_loss = eval_loss
                 torch.save(dvae.state_dict(), dvae_pretrained)
-
-                # lora_state_dict = {k: v for k, v in dvae.state_dict().items() if "lora_" in k}
-                # torch.save(lora_state_dict, os.path.join(output_path, "dvae-lora.pth"))
             print(f"#######################################\nepoch: {i}\tEVAL loss: {eval_loss}\n#######################################")
 
     print(f'Checkpoint saved at {dvae_pretrained}')
