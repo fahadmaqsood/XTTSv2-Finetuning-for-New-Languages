@@ -190,18 +190,21 @@ def mailabs(root_path, meta_files=None, ignored_speakers=None):
 
 
 def ljspeech(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
-    """Normalizes the LJSpeech meta data file to TTS format
-    https://keithito.com/LJ-Speech-Dataset/"""
+    """Loads LJSpeech-style metadata using pandas, assuming file has headers."""
     txt_file = os.path.join(root_path, meta_file)
-    items = []
-    speaker_name = "ljspeech"
-    with open(txt_file, "r", encoding="utf-8") as ttf:
-        for line in ttf:
-            cols = line.split("|")
-            wav_file = os.path.join(root_path, "wavs", cols[0] + ".wav")
-            text = cols[2]
-            items.append({"text": text, "audio_file": wav_file, "speaker_name": speaker_name, "root_path": root_path})
-    return items
+    
+    df = pd.read_csv(txt_file, sep="|")
+    df["root_path"] = root_path  # Add root_path column
+
+    long_text_count = df[df["text"].str.len() > 300].shape[0]
+    print(f"Number of rows with text > 300 characters: {long_text_count}")
+
+
+    df = df[df["text"].str.len() <= 300]  # Exclude long texts
+
+    
+    
+    return df[["audio_file", "text", "speaker_name", "lang", "root_path"]].to_dict(orient="records")
 
 
 def ljspeech_test(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
