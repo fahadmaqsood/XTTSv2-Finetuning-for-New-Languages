@@ -196,13 +196,14 @@ def ljspeech(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
     df = pd.read_csv(txt_file, sep="|")
     df["root_path"] = root_path  # Add root_path column
 
-    long_text_count = df[df["text"].str.len() > 300].shape[0]
-    print(f"Number of rows with text > 300 characters: {long_text_count}")
+    long_text_count = df[(df["lang"] == "en") & (df["text"].str.len() > 250)].shape[0]
+    print(f"Number of English rows with text > 250 characters: {long_text_count}")
 
 
-    df = df[df["text"].str.len() <= 300]  # Exclude long texts
+    # Skip English rows with text > 250 characters
+    df = df[~((df["lang"] == "en") & (df["text"].str.len() > 250))]
 
-    
+
     
     return df[["audio_file", "text", "speaker_name", "lang", "root_path"]].to_dict(orient="records")
 
