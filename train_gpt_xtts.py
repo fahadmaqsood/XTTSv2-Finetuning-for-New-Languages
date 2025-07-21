@@ -67,12 +67,12 @@ def train_gpt(metadatas, num_epochs, batch_size, grad_acumm, output_path, max_au
         print(train_csv, eval_csv, language)
 
         config_dataset = BaseDatasetConfig(
-            formatter="coqui",
-            dataset_name="ft_dataset",
+            formatter="ljspeech",
+            dataset_name="ljspeech",
             path=os.path.dirname(train_csv),
             meta_file_train=os.path.basename(train_csv),
             meta_file_val=os.path.basename(eval_csv),
-            language=language,
+            language="auto",
         )
 
         DATASETS_CONFIG_LIST.append(config_dataset)
