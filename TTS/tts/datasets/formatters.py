@@ -195,6 +195,7 @@ def ljspeech(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
     
     df = pd.read_csv(txt_file, sep="|")
     df["root_path"] = root_path  # Add root_path column
+    df["ref_file"] = "null" 
 
     long_text_count = df[(df["lang"] == "en") & (df["text"].str.len() > 250)].shape[0]
     print(f"Number of English rows with text > 250 characters: {long_text_count}")
@@ -205,7 +206,7 @@ def ljspeech(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
 
 
     
-    return df[["audio_file", "text", "speaker_name", "lang", "root_path"]].to_dict(orient="records")
+    return df[["audio_file", "text", "speaker_name", "lang", "root_path", "ref_file"]].to_dict(orient="records")
 
 
 def ljspeech_test(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
